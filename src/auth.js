@@ -35,6 +35,8 @@ var strings = require('./strings');
 function Auth(ak, sk) {
     this.ak = ak;
     this.sk = sk;
+    // 全局变量
+    this.g_signed_headers=''
 }
 
 /**
@@ -53,9 +55,21 @@ function Auth(ak, sk) {
 Auth.prototype.generateAuthorization = function (method, resource, params,
                                                  headers, timestamp, expirationInSeconds, headersToSign) {
 
-    var now = timestamp ? new Date(timestamp * 1000) : new Date();
+    if (resource.includes('bos-share.baidubce.com')) {
+        return this.generateIAMAuthorization({
+            url:resource,
+            params,
+            method,
+            headers,
+            timestamp,
+            expirationInSeconds,
+            signedHeaders: headersToSign
+        })
+    }
+
+    var now = this.getTimestamp(timestamp);
     var rawSessionKey = util.format('bce-auth-v1/%s/%s/%d',
-        this.ak, now.toISOString().replace(/\.\d+Z$/, 'Z'), expirationInSeconds || 1800);
+        this.ak, now, expirationInSeconds || 1800);
     debug('rawSessionKey = %j', rawSessionKey);
     var sessionKey = this.hash(rawSessionKey, this.sk);
 
@@ -160,6 +174,167 @@ Auth.prototype.hash = function (data, key) {
     sha256Hmac.update(data);
     return sha256Hmac.digest('hex');
 };
+
+
+/* IAM 逻辑 */
+
+Auth.prototype.getTimestamp = function getTimestamp(timestamp) {
+    var now = timestamp ? new Date(timestamp * 1000) : new Date();
+    return now.toISOString().replace(/\.\d+Z$/, 'Z');
+}
+
+Auth.prototype.normalize = function normalize(string, encodingSlash) {
+    var kEscapedMap = {
+        '!': '%21',
+        '\'': '%27',
+        '(': '%28',
+        ')': '%29',
+        '*': '%2A'
+    };
+
+    if (string === null) {
+        return "";
+    }
+    var result = encodeURIComponent(string);
+    result = result.replace(/[!'\(\)\*]/g, function ($1) {
+        return kEscapedMap[$1];
+    });
+
+    if (encodingSlash === false) {
+        result = result.replace(/%2F/gi, '/');
+    }
+
+    return result;
+}
+
+Auth.prototype.generateCanonicalUri = function generateCanonicalUri(url) {
+    console.log(require('url').parse(url));
+    var pathname = require('url').parse(url).pathname.trim();
+    var resources = pathname.replace(/^\//,'').split('/')
+    if (!resources) {
+        return "";
+    }
+    var normalizedResourceStr = "";
+    for (var i = 0; i < resources.length; i++) {
+        normalizedResourceStr += "/" + this.normalize(resources[i]);
+    }
+    return normalizedResourceStr;
+}
+
+Auth.prototype.generateCanonicalQueryString = function generateCanonicalQueryString(params) {
+    var queryList = Object.entries(params)
+    var normalizedQueryList = []
+    for (var i = 0; i < queryList.length; i++) {
+        if (queryList[i][0].toLowerCase() == "authorization") {
+            continue;
+        }
+        normalizedQueryList.push(this.normalize(queryList[i][0]) + "=" + this.normalize(queryList[i][1]));
+    }
+    normalizedQueryList.sort();
+    return normalizedQueryList.join('&');
+}
+
+/**
+ * 
+ * @param {Record<string,string>} headers 
+ * @param {string[] | undefined} signedHeaders 
+ * @returns 
+ */
+Auth.prototype.generateCanonicalHeaders = function generateCanonicalHeaders(headers, url, signedHeaders) {
+    var defaultHeaders = ["host", "content-length", "content-type", "content-md5"];
+    var keyStrList = [];
+    headerKeys = Object.keys(headers);
+    if (!headerKeys.includes('host')) {
+        headers['host'] = require('url').parse(url).hostname
+    }
+
+    if (!signedHeaders) {
+        for (var i = 0; i < defaultHeaders.length; i++) {
+            keyStrList.push(defaultHeaders[i]);
+        }
+
+        var headerListObj = Object.entries(headers);
+        for (var i = 0; i < headerListObj.length; i++) {
+            var key = headerListObj[i][0];
+            if (key.toLowerCase().startsWith("x-bce-")) {
+                keyStrList.push(key.toLowerCase());
+            }
+        }
+    } else {
+        keyStrList = signedHeaders;
+        for (var i = 0; i < keyStrList.length; i++) {
+            keyStrList[i] = keyStrList[i].toLowerCase();
+        }
+        if (!keyStrList.includes("host")) {
+            keyStrList.push("host");
+        }
+    }
+    var usedHeaderStrList = [];
+    for (var i = 0; i < keyStrList.length; i++) {
+        key = keyStrList[i];
+        value = headers[key];
+        if (!value || value === "") {
+            continue;
+        }
+        key = key.toLowerCase();
+        value = value.trim();
+        usedHeaderStrList.push(this.normalize(key) + ":" + this.normalize(value));
+    }
+
+    usedHeaderStrList.sort();
+    var usedHeaderKeys = [];
+    usedHeaderStrList.forEach(function (item) {
+        usedHeaderKeys.push(item.split(':')[0]);
+    });
+    var canonicalHeaderStr = usedHeaderStrList.join('\n');
+    this.g_signed_headers = usedHeaderKeys.join(';');
+    return canonicalHeaderStr;
+}
+
+/**
+ * 
+ * @param {{url:string,params:Record<string,any>,headers:Record<string,any>,timestamp?:number,expirationInSeconds?:string,signedHeaders?:string[]}} options 
+ * @returns string
+ */
+Auth.prototype.generateIAMAuthorization = function generateAuthorization(options) {
+    var timestamp = this.getTimestamp(options.timestamp);
+    var signedHeaders = options.signedHeaders;
+    var url = options.url;
+    var params = options.params;
+    var headers= options.headers;
+    var authVersion = "1";
+    var expirationInSeconds = options.expirationInSeconds || "1800";
+    var accessKey = this.ak;
+    var secretKey = this.sk;
+    var method = options.method;
+
+    signingKeyStr = "bce-auth-v" + authVersion + "/" + accessKey.trim() + "/" + timestamp + "/" + expirationInSeconds;
+    signingKey = this.hash(signingKeyStr, secretKey.trim());
+
+    canonicalUri = this.generateCanonicalUri(url);
+    debug("Canonical Uri: %s", canonicalUri);
+
+    canonicalQueryString = this.generateCanonicalQueryString(params);
+    debug("Canonical Query string: %s", canonicalQueryString);
+
+    canonicalHeaders = this.generateCanonicalHeaders(headers, url,signedHeaders);
+    debug("Canonical Headers: \n %s", canonicalHeaders);
+
+    canonicalRequest = method.toUpperCase() + "\n" + canonicalUri + "\n" + canonicalQueryString + "\n" + canonicalHeaders;
+    debug("Canonical Request: \n %s", canonicalRequest);
+
+    signature = this.hash(canonicalRequest, signingKey.toString());
+    debug("Signature: %s", signature.toString());
+    // console.log("Canonical Uri: " + canonicalUri);
+    // console.log("Canonical Query string: " + canonicalQueryString);
+    // console.log("Canonical Headers: \n" + canonicalHeaders);
+    // console.log("Canonical Request: \n" + canonicalRequest);
+    // console.log("Signature: " + signature.toString());
+
+    var Authorization = signingKeyStr + "/" + this.g_signed_headers + "/" + signature.toString();
+
+    return Authorization;
+}
 
 module.exports = Auth;
 

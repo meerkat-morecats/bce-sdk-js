@@ -406,6 +406,10 @@ HttpClient.prototype._getRequestUrl = function (path, params) {
         uri += '?' + qs;
     }
 
+    if (/^https?/.test(uri)) {
+        return uri;
+    }
+
     return this.config.endpoint + uri;
 };
 

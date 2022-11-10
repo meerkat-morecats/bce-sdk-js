@@ -118,7 +118,7 @@ BosClient.prototype.generatePresignedUrl = function (bucketName, key, timestamp,
 BosClient.prototype.generateUrl = function (bucketName, key, pipeline, cdn, config) {
     config = u.extend({}, this.config, config);
     bucketName = config.cname_enabled ? '' : bucketName;
-    
+
     var resource = path.normalize(path.join(
         config.removeVersionPrefix ? '/' : '/v1',
         strings.normalize(bucketName || ''),
@@ -1012,7 +1012,7 @@ BosClient.prototype.postObject = function (bucketName, key, data, options) {
 
 // --- E N D ---
 
-BosClient.prototype.sendRequest = function (httpMethod, varArgs) {
+BosClient.prototype.sendRequest = function (httpMethod, varArgs, requestUrl) {
     var defaultArgs = {
         bucketName: null,
         key: null,
@@ -1026,7 +1026,7 @@ BosClient.prototype.sendRequest = function (httpMethod, varArgs) {
     var args = u.extend(defaultArgs, varArgs);
 
     var config = u.extend({}, this.config, args.config);
-    var resource = path.normalize(path.join(
+    var resource = requestUrl || path.normalize(path.join(
         args.removeVersionPrefix ? '/' : '/v1',
         /\.[\w\-]+\.bcebos\.com$/.test(config.endpoint) ? '' : strings.normalize(args.bucketName || ''),
         strings.normalize(args.key || '', false)
@@ -1184,6 +1184,24 @@ BosClient.prototype._prepareObjectHeaders = function (options) {
     }
 
     return headers;
+};
+
+/**
+ *
+ * @param {{prefix:string,bucket:string,shareCode:string,durationSeconds:number}} body
+ * @returns
+ */
+BosClient.prototype.createFolderShareUrl = function (body, config) {
+    const endpoint = this.config.endpoint.replace(/^https?\:\/\//, '');
+    return this.sendRequest(
+        "POST",
+        {
+            body: JSON.stringify(u.extend({ endpoint: endpoint }, body)),
+            config: u.extend({ protocol: "https" }, config),
+            params: { action: 'urlGet' }
+        },
+        "https://bos-share.baidubce.com/"
+    );
 };
 
 module.exports = BosClient;
